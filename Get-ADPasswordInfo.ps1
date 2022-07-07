@@ -10,47 +10,45 @@ Function Get-ADPasswordInfo {
     .Parameter Server
     This is the domain/server to perform the AD lookup with. The function will attempt to obtain this on it own, but will throw an error if it fails and may require providing this parameter.
     .Example
-    Get-ADPasswordInfo -User JohnS 
-
-    Displayname            Passwordlastset      ExpiryDate           Lockedout LockoutTime LastFailedAuth
-    -----------            ---------------      ----------           --------- ----------- --------------
-    Smith, John            2/13/2020 3:44:03 PM 4/13/2020 4:44:03 PM     False             3/16/2020 7:16:02 AM
+    Get-ADPasswordInfo -User JohnS  
+    User    Displayname            Passwordlastset      ExpiryDate           Lockedout LockoutTime LastFailedAuth
+    ----    -----------            ---------------      ----------           --------- ----------- --------------
+    JohnS   Smith, John            2/13/2020 3:44:03 PM 4/13/2020 4:44:03 PM     False             3/16/2020 7:16:02 AM
     .Example
-    Get-ADPasswordInfo -User JohnS -server contoso.com  
+    Get-ADPasswordInfo -User JohnS -Server contoso2.local  
     .Example
-    $people | Get-ADPasswordInfo   
-
+    $people | Get-ADPasswordInfo  
+      
     # in the above example $people is an array of usernames. The function will return a table with all results
     .NOTES
-        Version:    2.1
-        Author:     C. Bodett
-        Creation Date: 2/27/2020
+    Version:        2.5
+    Author:         C. Bodett
+    Creation Date:  6/2/2022
+    Purpose/Change: Changed array-addition method and moved it logically to inside the try/catch to avoid weird duplicate behavior. 
     #>
+    [cmdletbinding()]
     Param(
-        [cmdletbinding()]
         [Parameter(Position = 0, ValueFromPipeline,Mandatory=$true)]
         [Alias('Username')]
-        $User,
-        [Parameter(Position = 1, Mandatory = $false)]
+        [string]$User,
         [string]$Server
     )
 
     Begin {
         # check to make sure the AD module is loaded
-        If (!(Get-module -name ActiveDirectory)){
+        if (!(Get-module -name ActiveDirectory)){
             Import-Module -Name ActiveDirectory
         }
 
-        If (-not($Server)){
-            $Server = (Get-CimInstance -ClassName CIM_ComputerSystem).Domain
-            If ($Server -eq "WORKGROUP"){
-                Throw "This computer is not joined to a domain. Please specify a domain, or server manually with -Server"
-            }
+        # get our current domain if not provided by the -Server parameter
+        If (-not $Server) {
+            $Server = Get-CimInstance -ClassName win32_computersystem | Select-Object -ExpandProperty Domain
         }
 
         # define our 'select-object' properties to make the command easier to read down below
         $SelObjArgs = [ordered]@{
-            Property = @("Displayname",
+            Property = @(@{Name="User";Expression={$_.SamAccountName}},
+                        "Displayname",
                         "Passwordlastset",
                         @{Name="ExpiryDate";Expression={[datetime]::fromfiletime($_."msds-userpasswordexpirytimecomputed")}},
                         "Lockedout",
@@ -58,8 +56,8 @@ Function Get-ADPasswordInfo {
                         @{Name="LastFailedAuth";Expression={ $_.lastbadpasswordattempt}}
             )
         }
-        # an array to store our results in
-        $Results = @()
+        # a generic list to store our results in
+        $Results = [System.Collections.Generic.List[Object]]::New()
     }
 
     Process {
@@ -67,28 +65,22 @@ Function Get-ADPasswordInfo {
         $GetADUserArgs = [ordered]@{
             Identity = $User
             Server = $server
-            Properties = @(
-                'Displayname',
-                'Passwordlastset',
-                'Badpasswordtime',
-                'msDS-userpasswordexpirytimecomputed',
-                'lockedout',
-                'accountlockouttime',
-                'LastBadPasswordAttempt'
-                )
+            Properties = @('Displayname','Passwordlastset','Badpasswordtime','msDS-userpasswordexpirytimecomputed','lockedout','accountlockouttime','LastBadPasswordAttempt')
         }
         # do the query and then append the info to the results array
         Try{
-            $ADinfo = Get-ADUser @GetADUserArgs -ErrorAction SilentlyContinue | Select-Object  @SelObjArgs
+            $ADInfo = Get-ADUser @GetADUserArgs -ErrorAction Stop | select-object  @SelObjArgs
+            $Results.Add($ADInfo)
         }Catch [Microsoft.ActiveDirectory.Management.ADIdentityNotFoundException]{
-            Write-Host "$User not found in domain: $Server" -ForegroundColor Yellow
+            Write-Warning "$User not found in domain: $Server"
         }Catch{
-            $Error[0].Exception
-        }
-        $Results+=$ADinfo
+            Write-Error $Error[0]
+        }        
     }
 
     End {
-        $Results | Format-Table
+        If ($Results) {
+            $Results | Format-Table
+        }
     }
 }
