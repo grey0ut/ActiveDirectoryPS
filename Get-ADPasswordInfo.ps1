@@ -11,76 +11,85 @@ Function Get-ADPasswordInfo {
     This is the domain/server to perform the AD lookup with. The function will attempt to obtain this on it own, but will throw an error if it fails and may require providing this parameter.
     .Example
     Get-ADPasswordInfo -User JohnS  
-    User    Displayname            Passwordlastset      ExpiryDate           Lockedout LockoutTime LastFailedAuth
-    ----    -----------            ---------------      ----------           --------- ----------- --------------
-    JohnS   Smith, John            2/13/2020 3:44:03 PM 4/13/2020 4:44:03 PM     False             3/16/2020 7:16:02 AM
+    User    Displayname            Passwordlastset      ExpiryDate           Lockedout LockoutTime LastFailedAuth       Server
+    ----    -----------            ---------------      ----------           --------- ----------- --------------       ------
+    JohnS   Smith, John            2/13/2020 3:44:03 PM 4/13/2020 4:44:03 PM     False             3/16/2020 7:16:02 AM contoso.local
     .Example
-    Get-ADPasswordInfo -User JohnS -Server contoso2.local  
+    Get-ADPasswordInfo -User JohnS,JohnD,JaneM -Server contoso2.local
     .Example
-    $people | Get-ADPasswordInfo  
-      
-    # in the above example $people is an array of usernames. The function will return a table with all results
+    Get-ADPasswordIfno -User JohnS,JohnD -Server Contoso.local,Osotnoc.Local
+    .Example
+    $people | Get-ADPasswordInfo   # where $people is an array of usernames. Will return a table with all results
     .NOTES
-    Version:        2.5
-    Author:         C. Bodett
-    Creation Date:  6/2/2022
-    Purpose/Change: Changed array-addition method and moved it logically to inside the try/catch to avoid weird duplicate behavior. 
+    Version:    2.6
+    Author:     C. Bodett
+    Creation Date: 9/14/2022
     #>
-    [cmdletbinding()]
+    [Cmdletbinding()]
     Param(
-        [Parameter(Position = 0, ValueFromPipeline,Mandatory=$true)]
-        [Alias('Username')]
-        [string]$User,
-        [string]$Server
+        [Parameter(Position = 0, ValueFromPipeline = $true, Mandatory = $true)]
+        [Alias('Username','Identity')]
+        [String[]]$User,
+        [Parameter(Position = 1)]
+        [Alias('Domain')]
+        [String[]]$Server
     )
-
+    
     Begin {
         # check to make sure the AD module is loaded
-        if (!(Get-module -name ActiveDirectory)){
-            Import-Module -Name ActiveDirectory
+        If (!(Get-module -name ActiveDirectory)){
+            Try {
+                Import-Module -Name ActiveDirectory -ErrorAction Stop
+            } Catch {
+                Throw "Could not import the ActiveDirectory module."
+            }
         }
 
-        # get our current domain if not provided by the -Server parameter
-        If (-not $Server) {
-            $Server = Get-CimInstance -ClassName win32_computersystem | Select-Object -ExpandProperty Domain
+        If (-not($Server)){
+            $Server = (Get-CimInstance -ClassName CIM_ComputerSystem).Domain
+            If ($Server -eq "WORKGROUP"){
+                Throw "This computer is not joined to a domain. Please specify a domain, or server manually with -Server"
+            }
         }
 
         # define our 'select-object' properties to make the command easier to read down below
         $SelObjArgs = [ordered]@{
-            Property = @(@{Name="User";Expression={$_.SamAccountName}},
-                        "Displayname",
-                        "Passwordlastset",
+            Property = @("DisplayName",
+                        "PasswordLastSet",
                         @{Name="ExpiryDate";Expression={[datetime]::fromfiletime($_."msds-userpasswordexpirytimecomputed")}},
                         "Lockedout",
                         @{Name="LockoutTime";Expression={ $_.accountlockouttime }},
                         @{Name="LastFailedAuth";Expression={ $_.lastbadpasswordattempt}}
+                        @{Name="Server";Expression={$ADServer}}
             )
         }
-        # a generic list to store our results in
+        # an array to store our results in
         $Results = [System.Collections.Generic.List[Object]]::New()
     }
-
+    
     Process {
-        # our command parameters, defined ahead of time for easier reading down below. This needs to be in the 'process' block so that the $user variable can be defined/updated from pipelineinput
-        $GetADUserArgs = [ordered]@{
-            Identity = $User
-            Server = $server
-            Properties = @('Displayname','Passwordlastset','Badpasswordtime','msDS-userpasswordexpirytimecomputed','lockedout','accountlockouttime','LastBadPasswordAttempt')
-        }
-        # do the query and then append the info to the results array
-        Try{
-            $ADInfo = Get-ADUser @GetADUserArgs -ErrorAction Stop | select-object  @SelObjArgs
-            $Results.Add($ADInfo)
-        }Catch [Microsoft.ActiveDirectory.Management.ADIdentityNotFoundException]{
-            Write-Warning "$User not found in domain: $Server"
-        }Catch{
-            Write-Error $Error[0]
-        }        
+        Foreach ($ADUser in $User) {
+            Foreach ($ADServer in $Server) {
+                # our command parameters, defined ahead of time for easier reading down below. This needs to be in the 'process' block so that the $user variable can be defined/updated from pipelineinput
+                $GetADUserArgs = [ordered]@{
+                    Identity = $ADUser
+                    Server = $ADServer
+                    Properties = @('Displayname','PasswordLastSet','Badpasswordtime','msDS-userpasswordexpirytimecomputed','lockedout','accountlockouttime','LastBadPasswordAttempt')
+                }
+                # do the query and then append the info to the results array
+                Try {
+                    $ADInfo = Get-ADUser @GetADUserArgs -ErrorAction Stop | Select-Object  @SelObjArgs
+                    $Results.Add($ADInfo)
+                } Catch [Microsoft.ActiveDirectory.Management.ADIdentityNotFoundException]{
+                    Write-Warning "$ADUser not found in domain: $ADServer"
+                } Catch{
+                    $Error[0].Exception
+                }
+            }
+        }  
     }
-
+    
     End {
-        If ($Results) {
-            $Results | Format-Table
-        }
+        $Results
     }
 }
